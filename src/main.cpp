@@ -1,7 +1,8 @@
 //SAMOGONER AE 3000
-//HW-364A 8266 NodeMCU + 0.96 OLED 
-//в планах отправка в базу sql для построения графиков
+//HW-364A 8266 NodeMCU + 0.96 OLED + 1Wire
+//в планах логирование и отправка температур в базу sql для построения графиков
 //21.06.25 поддержка олед экрана с температурами и временем разгонки, 2 датчика температуры по 1w, светодиоды, зуммер, кнопка, wifi, tg, ota, реле (на будущее) 
+//25,06,25 изменена логика, проверка датчиков, сайт, логирование  
 
 
 #include <Arduino.h>
@@ -16,6 +17,7 @@
 #include <UniversalTelegramBot.h>
 #include <ArduinoOTA.h>
 #include <ESP8266HTTPClient.h>
+#include <ESP8266WebServer.h>  
 
 #include "config.h"
 
@@ -34,6 +36,7 @@
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, -1);
 OneWire oneWire(ONE_WIRE_BUS);
 DallasTemperature sensors(&oneWire);
+ESP8266WebServer server(80);   
 
 DeviceAddress sensor1 = { 0x28, 0xC0, 0x9A, 0x5A, 0x00, 0x00, 0x00, 0x48 }; //в кубе
 DeviceAddress sensor2 = { 0x28, 0x0F, 0xF8, 0x5A, 0x00, 0x00, 0x00, 0x61 }; //вода
@@ -43,17 +46,39 @@ UniversalTelegramBot bot(tgBotToken, client);
 
 unsigned long startMillis;
 unsigned long lastBeepMillis = 0;
-bool alarmActive = false;  // сигнал
+unsigned long nextHourlyMillis = 0; 
+
+//bool alarmActive = false;  // сигнал
 bool buttonAcknowledged = false;  //сброса сигнала
 
 // Tg 
-bool sent60 = false;
-bool sent79 = false;
-bool sent92 = false;
-bool sent50_2 = false;
-bool sent60_2 = false;
+bool sent60=false, sent79=false, sent92=false, sent97=false, sent52_2=false, sent60_2=false;
 
 bool buzzerActive = false;
+int beepMode = 0;
+
+bool sensor1ErrorSent = false;
+bool sensor2ErrorSent = false;
+
+
+void sendLogEvent(const String &eventMessage) {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    WiFiClient client;
+    http.begin(client, "http://192.168.1.123:54321/log");
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+    String postData = "event=" + eventMessage;
+    int httpCode = http.POST(postData);
+    if (httpCode > 0) {
+      Serial.println("Событие отправлено: " + eventMessage);
+    } else {
+      bot.sendMessage(chatId4, "Ошибка логирования", "");
+    }
+    http.end();
+  } else {
+    Serial.println("WiFi не подключен");
+  }
+}
 
 void sendTelegramMessage(const String &message) {
   bot.sendMessage(chatId4, message, "");
@@ -62,13 +87,13 @@ void sendTelegramMessage(const String &message) {
 void setupWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
-  Serial.print("Connecting to WiFi");
+  Serial.print("Connecting ");
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
   }
   Serial.println();
-  Serial.print("Connected! IP address: ");
+  Serial.print("IP: ");
   Serial.println(WiFi.localIP());
 
   client.setInsecure();
@@ -77,18 +102,17 @@ void setupWiFi() {
 void setup() {
   Serial.begin(115200);
 
-  // Пины
   pinMode(RED_LED, OUTPUT);
   pinMode(BLUE_LED, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
   pinMode(RELAY_PIN, OUTPUT);
-  pinMode(LED_BUILTIN, OUTPUT);  // светодиод d4
+  pinMode(LED_BUILTIN, OUTPUT);  //встроенный светодиод d4 
 
   // OLED
   Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
-    Serial.println(F("SSD1306 allocation failed"));
+    Serial.println(F("SSD1306 failed"));
     for (;;);
   }
   display.clearDisplay();
@@ -102,18 +126,69 @@ void setup() {
   sensors.begin();
 
   startMillis = millis();
+  nextHourlyMillis = startMillis + 3600000;  
 
   setupWiFi();
 
-  delay(1000);
-  bool success = bot.sendMessage(chatId4, "Запуск Cамогонера AE 3000", "");
+  //тест
+  digitalWrite(RED_LED, HIGH);              
+  digitalWrite(BLUE_LED, HIGH);             
+  digitalWrite(BUZZER_PIN, HIGH);           
+  delay(300);                               
+  digitalWrite(RED_LED, LOW);
+  digitalWrite(BLUE_LED, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  sendLogEvent("Запуск Самогонера АЕ 3000 ");   
+  delay(500);
+
+  bool success = bot.sendMessage(chatId4, "Запуск Cамогонера AE 3000 ", "");
   if (success) {
-    Serial.println("Сообщение о запуске отправлено.");
+    Serial.println("Сообщение отправлено ");
   } else {
-    Serial.println("Ошибка отправки сообщения о запуске.");
+    Serial.println("Ошибка отправки о запуске ");
   }
 
   ArduinoOTA.begin();  
+
+  server.on("/", []() {
+    sensors.requestTemperatures();
+    float h1 = sensors.getTempC(sensor1);
+    float h2 = sensors.getTempC(sensor2);
+    unsigned long elapsed = millis() - startMillis;
+    unsigned long minutes = elapsed / 60000;
+
+    String dataHtml = "<h1>AE Automation</h1>"
+                    "<p>Время работы: " + String(minutes) + " мин</p>"
+                    "<p>В кубе: " + String(h1,1) + "°C</p>"
+                    "<p>Охлаждение: " + String(h2,1) + "°C</p>";  
+
+    String page =
+      "<!DOCTYPE html>"
+      "<html><head>"
+        "<meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width, initial-scale=1.0'>"
+        "<title>Данные Самогонера</title>"
+        "<style>"
+          "html, body { margin:0; padding:0; min-height:100vh; }"
+          "body {"
+            "background: url('https://cojo.ru/wp-content/uploads/2022/12/anime-fon-luna-1.webp') no-repeat center center fixed;"
+            "background-size: cover;"
+            "font-family: Arial, sans-serif;"
+            "color: #fff;"
+            "text-align: center;"
+            "padding-top: 50px;"
+          "}"
+          "h1 { color: #FF0000; }"
+        "</style>"
+      "</head><body>" +
+        dataHtml +
+      "</body></html>";
+
+    server.send(200, "text/html", page);
+  });
+
+  server.begin();
 
 }
 
@@ -123,15 +198,43 @@ void loop() {
   delay(100);
   digitalWrite(LED_BUILTIN, HIGH);
 
+  oneWire.reset();  
   sensors.requestTemperatures();
   float t1 = sensors.getTempC(sensor1);
   float t2 = sensors.getTempC(sensor2);
 
-  // Время в минутах
+  // валидность температуры
+  if (t1 == DEVICE_DISCONNECTED_C || !sensors.isConnected(sensor1)) {
+    if (!sensor1ErrorSent) {
+      sendTelegramMessage("Ошибка: T1 отключён!");
+      sendLogEvent("Sensor1 offline");
+      sensor1ErrorSent = true;
+    }
+  } else {
+    sensor1ErrorSent = false;
+  }
+  if (t2 == DEVICE_DISCONNECTED_C || !sensors.isConnected(sensor2)) {
+    if (!sensor2ErrorSent) {
+      sendTelegramMessage("Ошибка: T2 отключён!");
+      sendLogEvent("Sensor2 offline");
+      sensor2ErrorSent = true;
+    }
+  } else {
+    sensor2ErrorSent = false;
+  }
+
+  if (t1 != DEVICE_DISCONNECTED_C && sensors.isConnected(sensor1)) {
+  sensor1ErrorSent = false;
+  }
+  if (t2 != DEVICE_DISCONNECTED_C && sensors.isConnected(sensor2)) {
+  sensor2ErrorSent = false;
+  }
+
+  //Время мин
   unsigned long elapsedMillis = millis() - startMillis;
   unsigned long minutes = elapsedMillis / 60000;
 
-  // OLED вывод
+  // OLED
   display.clearDisplay();
   display.setTextSize(2);
   display.setCursor(0, 0);
@@ -145,78 +248,101 @@ void loop() {
   display.display();
 
 // Индикация
-  if (t1 >= 79 && t1 < 92) {
-    digitalWrite(BLUE_LED, HIGH);
-  } else {
-    digitalWrite(BLUE_LED, LOW);
-  }
+  digitalWrite(BLUE_LED, (t1 >= 79.0 && t1 < 92.5) ? HIGH : LOW);
+  digitalWrite(RED_LED, (t1 >= 92.5 || t2 > 50.0) ? HIGH : LOW);
 
-  if (t1 >= 92 || t2 > 50) {
-    digitalWrite(RED_LED, HIGH);
-  } else {
-    digitalWrite(RED_LED, LOW);
-  }
+// Пороги, зуммер и тг
 
-// Пороги, зуммер + тг
-
-  if (t1 >= 60 && !sent60) {
+  if (t1 >= 60.0 && !sent60) {
     sendTelegramMessage("Включить охлаждение");
-    sent60 = true;
-    buzzerActive = true;
-    buttonAcknowledged = false;
+    sendLogEvent("Охлаждение");
+    sent60 = true; buzzerActive = true; buttonAcknowledged = false; beepMode = 1; // 0.5с/5с
   }
-  if (t1 >= 79 && !sent79) {
+  if (t1 < 59.0) sent60 = false;
+
+  if (t1 >= 79.0 && !sent79) {
     sendTelegramMessage("Тело");
-    sent79 = true;
-    buzzerActive = true;
-    buttonAcknowledged = false;
+    sendLogEvent("Тело");
+    sent79 = true; buzzerActive = true; buttonAcknowledged = false; beepMode = 1;   
   }
-  if (t1 >= 92 && !sent92) {
+  if (t1 < 78.0) sent79 = false;
+
+  if (t1 >= 92.5 && !sent92) {
     sendTelegramMessage("Хвосты!");
-    sent92 = true;
-    buzzerActive = true;
-    buttonAcknowledged = false;
+    sendLogEvent("Хвосты");
+    sent92 = true; buzzerActive = true; buttonAcknowledged = false; beepMode = 1; 
   }
-  if (t2 >= 50 && !sent50_2) {
+  if (t1 < 91.5) sent92 = false;
+
+  if (t2 >= 52.0 && !sent52_2) {
     sendTelegramMessage("Перегрев");
-    sent50_2 = true;
-    buzzerActive = true;
-    buttonAcknowledged = false;
+    sendLogEvent("Перегрев");
+    sent52_2 = true; buzzerActive = true; buttonAcknowledged = false; beepMode = 2; // 1с/2с
   }
-  if (t2 >= 60 && !sent60_2) {
+  if (t2 < 49.0) sent52_2 = false;
+
+  if (t2 >= 60.0 && !sent60_2) {
     sendTelegramMessage("Штанга");
-    sent60_2 = true;
-    buzzerActive = true;
-    buttonAcknowledged = false;
+    sendLogEvent("Штанга");
+    sent60_2 = true; buzzerActive = true; buttonAcknowledged = false; beepMode = 2;
+  }
+  if (t2 < 59.0) sent60_2 = false;
+
+  if (t1 >= 97.6 && !sent97) {
+    sendTelegramMessage("Остановись!");
+    sendLogEvent("Остановись");
+    sent97 = true; buzzerActive = true; buttonAcknowledged = false; beepMode = 3; // 3с/1с
+  }
+  if (t1 < 96.9) sent97 = false;
+
+  // Сброс зуммера кнопкой
+  if (digitalRead(BUTTON_PIN) == LOW && buzzerActive && beepMode != 3) {
+    buttonAcknowledged = true;
+    digitalWrite(BUZZER_PIN, LOW);
   }
 
-  // Обработка кнопки
-  if (digitalRead(BUTTON_PIN) == LOW) {
-    if (buzzerActive) {
-      buttonAcknowledged = true;
-      digitalWrite(BUZZER_PIN, LOW);
-    }
-  }
-
-  if (t1 < 60) sent60 = false;
-  if (t1 < 79) sent79 = false;
-  if (t1 < 92) sent92 = false;
-  if (t2 < 50) sent50_2 = false;
-  if (t2 < 60) sent60_2 = false;
-
-  // Зуммер
   if (buzzerActive && !buttonAcknowledged) {
-    if (millis() - lastBeepMillis >= 5000) {
-      digitalWrite(BUZZER_PIN, HIGH);
-      delay(450);
-      digitalWrite(BUZZER_PIN, LOW);
-      lastBeepMillis = millis();
+    unsigned long now = millis();
+    switch (beepMode) {
+      case 1: // 0.5с в 5сек
+        if (now - lastBeepMillis >= 5000) {
+          digitalWrite(BUZZER_PIN, HIGH);
+          delay(500);
+          digitalWrite(BUZZER_PIN, LOW);
+          lastBeepMillis = now;
+        }
+        break;
+      case 2: // 1/2
+        if (now - lastBeepMillis >= 2000) {
+          digitalWrite(BUZZER_PIN, HIGH);
+          delay(1000);
+          digitalWrite(BUZZER_PIN, LOW);
+          lastBeepMillis = now;
+        }
+        break;
+      case 3: // 3/1
+        if (now - lastBeepMillis >= 4000) {
+          digitalWrite(BUZZER_PIN, HIGH);
+          delay(3000);
+          digitalWrite(BUZZER_PIN, LOW);
+          lastBeepMillis = now;
+        }
+        break;
     }
   } else {
     digitalWrite(BUZZER_PIN, LOW);
   }
 
+  if (millis() >= nextHourlyMillis) {
+    unsigned long hours = (millis() - startMillis) / 3600000;
+    sendTelegramMessage("Уже " + String(hours) + " ч с запуска");
+    sendLogEvent("Часов работы: " + String(hours));
+    nextHourlyMillis += 3600000;
+  }  
+
   digitalWrite(RELAY_PIN, LOW);
+
+  server.handleClient();  
 
   ArduinoOTA.handle();  
 
