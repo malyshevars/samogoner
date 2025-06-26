@@ -3,6 +3,7 @@
 //в планах логирование и отправка температур в базу sql для построения графиков
 //21.06.25 поддержка олед экрана с температурами и временем разгонки, 2 датчика температуры по 1w, светодиоды, зуммер, кнопка, wifi, tg, ota, реле (на будущее) 
 //25,06,25 изменена логика, проверка датчиков, сайт, логирование  
+//27,06,25 изменена логика, датчик перелива, термостат
 
 
 #include <Arduino.h>
@@ -29,6 +30,10 @@
 #define RELAY_PIN D0        // Реле
 #define OLED_SDA D5         // OLED SDA
 #define OLED_SCL D6         // OLED SCL
+#define THERMOSTAT_PIN D0        // TERMOSTAT
+#define LIQUID_SENSOR_PIN A0     // Перелив 
+
+#define LIQUID_THRESHOLD 300 
 
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
@@ -106,7 +111,7 @@ void setup() {
   pinMode(BLUE_LED, OUTPUT);
   pinMode(BUZZER_PIN, OUTPUT);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
-  pinMode(RELAY_PIN, OUTPUT);
+  pinMode(THERMOSTAT_PIN, INPUT_PULLUP);
   pinMode(LED_BUILTIN, OUTPUT);  //встроенный светодиод d4 
 
   // OLED
@@ -133,11 +138,13 @@ void setup() {
   //тест
   digitalWrite(RED_LED, HIGH);              
   digitalWrite(BLUE_LED, HIGH);             
-  digitalWrite(BUZZER_PIN, HIGH);           
+  digitalWrite(BUZZER_PIN, HIGH);
+  digitalWrite(LED_BUILTIN, LOW);
   delay(300);                               
   digitalWrite(RED_LED, LOW);
   digitalWrite(BLUE_LED, LOW);
   digitalWrite(BUZZER_PIN, LOW);
+  digitalWrite(LED_BUILTIN, HIGH);
 
   sendLogEvent("Запуск Самогонера АЕ 3000 ");   
   delay(500);
@@ -247,6 +254,45 @@ void loop() {
   display.printf("T2:%.1f", t2);
   display.display();
 
+  //перелив
+
+  static bool overflowActive = false;
+  int liquidValue = analogRead(LIQUID_SENSOR_PIN);                  
+  bool overflow = liquidValue > LIQUID_THRESHOLD;                   
+  
+  if (overflow && !overflowActive) {
+    overflowActive = true;
+    digitalWrite(RED_LED, HIGH);                                     
+    buzzerActive = true;                                             
+    beepMode = 1;                                                    
+    sendTelegramMessage("Перелив");                                  
+    sendLogEvent("Перелив");
+  } 
+  else if (!overflow && overflowActive) {
+    overflowActive = false;
+    buzzerActive = false; 
+    beepMode = 0;                                                 
+  }
+
+
+  // термостат
+  static bool thermoActive = false;
+  bool thermoTriggered = digitalRead(THERMOSTAT_PIN) == HIGH;        
+  
+  if (thermoTriggered && !thermoActive) {
+    thermoActive = true;
+    digitalWrite(RED_LED, HIGH);
+    buzzerActive = true;
+    beepMode = 2;                                                    
+    sendTelegramMessage("Пропало охлаждение!");
+    sendLogEvent("Пропало охлаждение!");
+  } 
+  else if (!thermoTriggered && thermoActive) {
+    thermoActive = false;
+    buzzerActive = false; 
+    beepMode = 0;                                                 
+  }
+
 // Индикация
   digitalWrite(BLUE_LED, (t1 >= 79.0 && t1 < 92.5) ? HIGH : LOW);
   digitalWrite(RED_LED, (t1 >= 92.5 || t2 > 50.0) ? HIGH : LOW);
@@ -304,6 +350,10 @@ void loop() {
   if (buzzerActive && !buttonAcknowledged) {
     unsigned long now = millis();
     switch (beepMode) {
+      case 0:  // выкл 
+        digitalWrite(BUZZER_PIN, LOW);
+        break;
+
       case 1: // 0.5с в 5сек
         if (now - lastBeepMillis >= 5000) {
           digitalWrite(BUZZER_PIN, HIGH);
@@ -312,6 +362,7 @@ void loop() {
           lastBeepMillis = now;
         }
         break;
+
       case 2: // 1/2
         if (now - lastBeepMillis >= 2000) {
           digitalWrite(BUZZER_PIN, HIGH);
@@ -320,6 +371,7 @@ void loop() {
           lastBeepMillis = now;
         }
         break;
+        
       case 3: // 3/1
         if (now - lastBeepMillis >= 4000) {
           digitalWrite(BUZZER_PIN, HIGH);
@@ -339,8 +391,6 @@ void loop() {
     sendLogEvent("Часов работы: " + String(hours));
     nextHourlyMillis += 3600000;
   }  
-
-  digitalWrite(RELAY_PIN, LOW);
 
   server.handleClient();  
 
