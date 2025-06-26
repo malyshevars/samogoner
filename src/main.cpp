@@ -3,8 +3,7 @@
 //в планах логирование и отправка температур в базу sql для построения графиков
 //21.06.25 поддержка олед экрана с температурами и временем разгонки, 2 датчика температуры по 1w, светодиоды, зуммер, кнопка, wifi, tg, ota, реле (на будущее) 
 //25,06,25 изменена логика, проверка датчиков, сайт, логирование  
-//27,06,25 изменена логика, датчик перелива, термостат
-
+//27,06,25 изменена логика, датчик перелива, термостат, убрано реле
 
 #include <Arduino.h>
 
@@ -27,7 +26,6 @@
 #define BLUE_LED D7         // Синий
 #define BUZZER_PIN D8       // Зуммер
 #define BUTTON_PIN D3       // Кнопка
-#define RELAY_PIN D0        // Реле
 #define OLED_SDA D5         // OLED SDA
 #define OLED_SCL D6         // OLED SCL
 #define THERMOSTAT_PIN D0        // TERMOSTAT
@@ -295,7 +293,9 @@ void loop() {
 
 // Индикация
   digitalWrite(BLUE_LED, (t1 >= 79.0 && t1 < 92.5) ? HIGH : LOW);
-  digitalWrite(RED_LED, (t1 >= 92.5 || t2 > 50.0) ? HIGH : LOW);
+  if (!overflowActive && !thermoActive) {
+    digitalWrite(RED_LED, (t1 >= 92.5 || t2 > 50.0) ? HIGH : LOW);
+  }  
 
 // Пороги, зуммер и тг
 
