@@ -5,6 +5,8 @@
 
 Использовались VSCode + PlatformIO + Arduino IDE.
 
+![Smgnr AE3000 HW-364A](https://github.com/user-attachments/assets/9019f772-5bdd-42b4-b8e9-4010f561ec2f)
+
 ---
 
 Основные возможности:
