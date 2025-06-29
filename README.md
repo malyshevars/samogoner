@@ -49,10 +49,11 @@
 ---
 
 Нюансы:
+
 В config.h укажите параметры Wi-Fi и Telegram Bot Token:
-const char* ssid     = "YOUR_SSID";
-const char* password = "YOUR_PASS";
-const char* tgBotToken = "YOUR_TELEGRAM_BOT_TOKEN";
-const char* chatId4 = "YOUR_CHAT_ID";
+const char* ssid     = "";
+const char* password = "";
+const char* tgBotToken = "";
+const char* chatId4 = "";
 
 Веб-страница с текущим временем работы и температурами доступна по IP-адресу контроллера.
