@@ -4,6 +4,11 @@
 //21.06.25 поддержка олед экрана с температурами и временем разгонки, 2 датчика температуры по 1w, светодиоды, зуммер, кнопка, wifi, tg, ota, реле (на будущее) 
 //25,06,25 изменена логика, проверка датчиков, сайт, логирование  
 //27,06,25 изменена логика, датчик перелива, термостат, убрано реле
+//03.07.25 добавлен функционал тестирования платы, через curl - задавая значение датчиков
+
+// curl "http://192.168.1.42/test?mode=on&t1=65.0&t2=30.0&liq=200&thermo=0"
+// curl "http://192.168.1.42/test?mode=off"
+
 
 #include <Arduino.h>
 
@@ -62,6 +67,13 @@ int beepMode = 0;
 
 bool sensor1ErrorSent = false;
 bool sensor2ErrorSent = false;
+
+//тестирование
+bool testMode = false;      
+float testT1 = 0.0;         
+float testT2 = 0.0;         
+int   testLiquid = 0;       
+bool  testThermo = false;   
 
 
 void sendLogEvent(const String &eventMessage) {
@@ -138,7 +150,7 @@ void setup() {
   digitalWrite(BLUE_LED, HIGH);             
   digitalWrite(BUZZER_PIN, HIGH);
   digitalWrite(LED_BUILTIN, LOW);
-  delay(300);                               
+  delay(1000);                               
   digitalWrite(RED_LED, LOW);
   digitalWrite(BLUE_LED, LOW);
   digitalWrite(BUZZER_PIN, LOW);
@@ -158,8 +170,8 @@ void setup() {
 
   server.on("/", []() {
     sensors.requestTemperatures();
-    float h1 = sensors.getTempC(sensor1);
-    float h2 = sensors.getTempC(sensor2);
+    float h1 = testMode ? testT1 : sensors.getTempC(sensor1);
+    float h2 = testMode ? testT2 : sensors.getTempC(sensor2);
     unsigned long elapsed = millis() - startMillis;
     unsigned long minutes = elapsed / 60000;
 
@@ -193,22 +205,71 @@ void setup() {
     server.send(200, "text/html", page);
   });
 
+  server.on("/test", HTTP_GET, [](){
+    bool prevMode = testMode;
+
+    if (server.hasArg("mode")) {
+      testMode = (server.arg("mode") == "on");
+    }
+
+    if (testMode && !prevMode) {
+      sent60   = false;
+      sent79   = false;
+      sent92   = false;
+      sent97   = false;
+      sent52_2 = false;
+      sent60_2 = false;
+    }
+
+    if (testMode) {
+      if (server.hasArg("t1")) testT1 = server.arg("t1").toFloat();
+      if (server.hasArg("t2")) testT2 = server.arg("t2").toFloat();
+      if (server.hasArg("liq")) testLiquid = server.arg("liq").toInt();
+      if (server.hasArg("thermo")) testThermo = (server.arg("thermo") == "1");
+    }
+
+    if (testMode != prevMode) {
+      sendTelegramMessage(testMode ? "Тестирование Включено" : "Тестирование Выключено");
+    }
+
+    String resp = String("Test mode ") + (testMode ? "ON" : "OFF");
+    if (testMode) {
+      resp += String("  t1=") + testT1
+           + String("  t2=") + testT2
+           + String("  liq=") + testLiquid
+           + String("  thermo=") + (testThermo ? "1":"0");
+    }
+
+    server.send(200, "text/plain", resp);
+  });
+
   server.begin();
 
 }
 
 void loop() {
-  // мигает
-  digitalWrite(LED_BUILTIN, LOW);
-  delay(100);
-  digitalWrite(LED_BUILTIN, HIGH);
+  // мигает если с вайфаем
+  if (WiFi.status() == WL_CONNECTED) {
+    digitalWrite(LED_BUILTIN, LOW);   
+    delay(150);
+    digitalWrite(LED_BUILTIN, HIGH);  
+    delay(50);
+  } else {
+    digitalWrite(LED_BUILTIN, HIGH); 
+  }
 
   oneWire.reset();  
   sensors.requestTemperatures();
-  float t1 = sensors.getTempC(sensor1);
-  float t2 = sensors.getTempC(sensor2);
+//  float t1 = sensors.getTempC(sensor1);
+//  float t2 = sensors.getTempC(sensor2);
 
-  // валидность температуры
+  float t1 = testMode ? testT1 : sensors.getTempC(sensor1);
+  float t2 = testMode ? testT2 : sensors.getTempC(sensor2);
+  int   liquidValue = testMode ? testLiquid : analogRead(LIQUID_SENSOR_PIN);
+  bool  thermoTriggered = testMode ? testThermo : (digitalRead(THERMOSTAT_PIN) == HIGH);
+
+
+  // валидность температур
   if (t1 == DEVICE_DISCONNECTED_C || !sensors.isConnected(sensor1)) {
     if (!sensor1ErrorSent) {
       sendTelegramMessage("Ошибка: T1 отключён!");
@@ -255,7 +316,7 @@ void loop() {
   //перелив
 
   static bool overflowActive = false;
-  int liquidValue = analogRead(LIQUID_SENSOR_PIN);                  
+ // int liquidValue = analogRead(LIQUID_SENSOR_PIN);                  
   bool overflow = liquidValue > LIQUID_THRESHOLD;                   
   
   if (overflow && !overflowActive) {
@@ -274,9 +335,11 @@ void loop() {
 
 
   // термостат
-  static bool thermoActive = false;
-  bool thermoTriggered = digitalRead(THERMOSTAT_PIN) == HIGH;        
   
+  static bool thermoActive = false;
+//  bool thermoTriggered = digitalRead(THERMOSTAT_PIN) == HIGH;        
+  
+
   if (thermoTriggered && !thermoActive) {
     thermoActive = true;
     digitalWrite(RED_LED, HIGH);
@@ -342,6 +405,7 @@ void loop() {
   if (t1 < 96.9) sent97 = false;
 
   // Сброс зуммера кнопкой
+  
   if (digitalRead(BUTTON_PIN) == LOW && buzzerActive && beepMode != 3) {
     buttonAcknowledged = true;
     digitalWrite(BUZZER_PIN, LOW);
