@@ -6,6 +6,7 @@
 //25,06,25 изменена логика, проверка датчиков, сайт, логирование  
 //27,06,25 изменена логика, датчик перелива, термостат, убрано реле
 //03.07.25 добавлен функционал тестирования платы, через curl - задавая значение датчиков
+//04,07,25 добавлен оффлай режим без вайфая, изменение в логике тестирования
 
 // curl "http://192.168.1.42/test?mode=on&t1=65.0&t2=30.0&liq=200&thermo=0"
 // curl "http://192.168.1.42/test?mode=off"
@@ -81,6 +82,13 @@ const unsigned long WIFI_RECONNECT_INTERVAL = 180000;
 unsigned long lastWifiTry = 0;
 bool wifiPreviouslyConnected = false;
 
+bool logErrorSent = false; 
+
+
+void sendTelegramMessage(const String &message) {
+  if (WiFi.status() != WL_CONNECTED) return;
+  bot.sendMessage(chatId4, message, "");
+}
 
 void sendLogEvent(const String &eventMessage) {
   if (WiFi.status() == WL_CONNECTED) {
@@ -90,20 +98,21 @@ void sendLogEvent(const String &eventMessage) {
     http.addHeader("Content-Type", "application/x-www-form-urlencoded");
     String postData = "event=" + eventMessage;
     int httpCode = http.POST(postData);
+       
     if (httpCode > 0) {
       Serial.println("Событие отправлено: " + eventMessage);
+      logErrorSent = false;
     } else {
-      sendTelegramMessage("Ошибка логирования");  
+      Serial.println("Ошибка логирования: httpCode=" + String(httpCode));
+      if (!logErrorSent) {
+        sendTelegramMessage("Ошибка логирования: " + String(httpCode));
+        logErrorSent = true;
+      }
     }
     http.end();
   } else {
-    Serial.println("WiFi не подключен");
+    Serial.println("Нет WiFi");
   }
-}
-
-void sendTelegramMessage(const String &message) {
-  if (WiFi.status() != WL_CONNECTED) return;
-  bot.sendMessage(chatId4, message, "");
 }
 
 void setupWiFi() {
@@ -128,6 +137,7 @@ void setupWiFi() {
     lastWifiTry = millis();
   }
 }
+
 
 void setup() {
   Serial.begin(115200);
@@ -174,12 +184,7 @@ void setup() {
   sendLogEvent("Запуск Самогонера АЕ 3000 ");   
   delay(500);
 
-  bool success = bot.sendMessage(chatId4, "Запуск Cамогонера AE 3000 ", "");
-  if (success) {
-    Serial.println("Сообщение отправлено ");
-  } else {
-    Serial.println("Ошибка отправки о запуске ");
-  }
+  sendTelegramMessage("Запуск Самогонера AE 3000");
 
   //ArduinoOTA.begin();  
 
@@ -227,6 +232,16 @@ void setup() {
       testMode = (server.arg("mode") == "on");
     }
 
+    if (!testMode && prevMode) {
+      sent60   = false;
+      sent79   = false;
+      sent92   = false;
+      sent97   = false;
+      sent52_2 = false;
+      sent60_2 = false;
+      sensor1ErrorSent = sensor2ErrorSent = false;    
+    }
+
     if (testMode && !prevMode) {
       sent60   = false;
       sent79   = false;
@@ -234,6 +249,7 @@ void setup() {
       sent97   = false;
       sent52_2 = false;
       sent60_2 = false;
+      sensor1ErrorSent = sensor2ErrorSent = false;    
     }
 
     if (testMode) {
@@ -261,6 +277,7 @@ void setup() {
   //server.begin();
 
 }
+
 
 void loop() {
   // мигает если с вайфаем
