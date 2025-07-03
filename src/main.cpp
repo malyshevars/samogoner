@@ -1,3 +1,4 @@
+
 //SAMOGONER AE 3000
 //HW-364A 8266 NodeMCU + 0.96 OLED + 1Wire
 //в планах логирование и отправка температур в базу sql для построения графиков
@@ -75,6 +76,11 @@ float testT2 = 0.0;
 int   testLiquid = 0;       
 bool  testThermo = false;   
 
+//вайфай
+const unsigned long WIFI_RECONNECT_INTERVAL = 180000; 
+unsigned long lastWifiTry = 0;
+bool wifiPreviouslyConnected = false;
+
 
 void sendLogEvent(const String &eventMessage) {
   if (WiFi.status() == WL_CONNECTED) {
@@ -87,7 +93,7 @@ void sendLogEvent(const String &eventMessage) {
     if (httpCode > 0) {
       Serial.println("Событие отправлено: " + eventMessage);
     } else {
-      bot.sendMessage(chatId4, "Ошибка логирования", "");
+      sendTelegramMessage("Ошибка логирования");  
     }
     http.end();
   } else {
@@ -96,6 +102,7 @@ void sendLogEvent(const String &eventMessage) {
 }
 
 void sendTelegramMessage(const String &message) {
+  if (WiFi.status() != WL_CONNECTED) return;
   bot.sendMessage(chatId4, message, "");
 }
 
@@ -103,15 +110,23 @@ void setupWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   Serial.print("Connecting ");
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 7000) { //7с подключаемся
     delay(500);
     Serial.print(".");
   }
-  Serial.println();
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
-
-  client.setInsecure();
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    Serial.print("WiFi OK, IP: ");
+    Serial.println(WiFi.localIP());
+    client.setInsecure();
+    server.begin();             
+    ArduinoOTA.begin();         
+    wifiPreviouslyConnected = true; 
+  } else {
+    Serial.println("Офлайн режим");
+    lastWifiTry = millis();
+  }
 }
 
 void setup() {
@@ -166,7 +181,7 @@ void setup() {
     Serial.println("Ошибка отправки о запуске ");
   }
 
-  ArduinoOTA.begin();  
+  //ArduinoOTA.begin();  
 
   server.on("/", []() {
     sensors.requestTemperatures();
@@ -243,7 +258,7 @@ void setup() {
     server.send(200, "text/plain", resp);
   });
 
-  server.begin();
+  //server.begin();
 
 }
 
@@ -273,7 +288,7 @@ void loop() {
   if (t1 == DEVICE_DISCONNECTED_C || !sensors.isConnected(sensor1)) {
     if (!sensor1ErrorSent) {
       sendTelegramMessage("Ошибка: T1 отключён!");
-      sendLogEvent("Sensor1 offline");
+      sendLogEvent("T1 отключён!");
       sensor1ErrorSent = true;
     }
   } else {
@@ -282,19 +297,21 @@ void loop() {
   if (t2 == DEVICE_DISCONNECTED_C || !sensors.isConnected(sensor2)) {
     if (!sensor2ErrorSent) {
       sendTelegramMessage("Ошибка: T2 отключён!");
-      sendLogEvent("Sensor2 offline");
+      sendLogEvent("T2 отключён!");
       sensor2ErrorSent = true;
     }
   } else {
     sensor2ErrorSent = false;
   }
 
+/*
   if (t1 != DEVICE_DISCONNECTED_C && sensors.isConnected(sensor1)) {
   sensor1ErrorSent = false;
   }
   if (t2 != DEVICE_DISCONNECTED_C && sensors.isConnected(sensor2)) {
   sensor2ErrorSent = false;
   }
+*/
 
   //Время мин
   unsigned long elapsedMillis = millis() - startMillis;
@@ -459,6 +476,21 @@ void loop() {
   server.handleClient();  
 
   ArduinoOTA.handle();  
+
+  if (WiFi.status() != WL_CONNECTED) {
+    if (millis() - lastWifiTry >= WIFI_RECONNECT_INTERVAL) {
+      Serial.println("Reconnecting... ");
+      WiFi.disconnect();
+      WiFi.begin(ssid, password);
+      lastWifiTry = millis();
+      wifiPreviouslyConnected = false;
+    }
+  } else if (!wifiPreviouslyConnected) {
+    Serial.println("Reconnected ");
+    server.begin();
+    ArduinoOTA.begin();
+    wifiPreviouslyConnected = true;
+  }  
 
   delay(50);
 }
